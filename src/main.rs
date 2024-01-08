@@ -1,8 +1,10 @@
-use std::sync::{Arc, Mutex, MutexGuard, mpsc::channel};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::collections::HashMap;
-use std::thread::{JoinHandle, spawn};
+use threadpool::ThreadPool;
 
 fn main() {
+    let start_time = std::time::Instant::now();
+
     let url: &str = "https://github.com/rust-lang/crates.io-index.git";
     let repo_path: &str = "./repo_clone";
     match git2::Repository::clone(url, repo_path) {
@@ -12,19 +14,18 @@ fn main() {
         }},
     };
 
-    let (sx, rx) = channel::<Option<std::thread::JoinHandle<()>>>();
+    let pool: ThreadPool = ThreadPool::default();
+    
+    type Amosvs = Arc<Mutex<Option<(String, Vec<String>)>>>;
+    type Amosu = Arc<Mutex<Option<(String, usize)>>>;
+    type Amos = Arc<Mutex<Option<String>>>;
+    type Amhsvs = Arc<Mutex<HashMap<String, Vec<String>>>>;
 
-    let queue_handler: JoinHandle<()> = spawn(move || {
-        while let Some(handle) = rx.recv().unwrap() {
-            handle.join().unwrap();
-        }
-    });
-
-    let max_dependencies_am: Arc<Mutex<Option<(String, Vec::<String>)>>> = Arc::new(Mutex::new(None));
-    let dependants_map_am: Arc<Mutex<HashMap<String, Vec::<String>>>> = Arc::new(Mutex::new(HashMap::<String, Vec::<String>>::new()));
-    let max_dependants_am: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let max_features_am: Arc<Mutex<Option<(String, Vec::<String>)>>> = Arc::new(Mutex::new(None));
-    let max_versions_am: Arc<Mutex<Option<(String, usize)>>> = Arc::new(Mutex::new(None));
+    let max_dependencies_am: Amosvs = Arc::new(Mutex::new(None));
+    let dependants_map_am: Amhsvs = Arc::new(Mutex::new(HashMap::<String, Vec::<String>>::new()));
+    let max_dependants_am: Amos = Arc::new(Mutex::new(None));
+    let max_features_am: Amosvs = Arc::new(Mutex::new(None));
+    let max_versions_am: Amosu = Arc::new(Mutex::new(None));
 
     // frequently used constants
     let name_json_str: &str = "\"name\":\"";
@@ -39,13 +40,13 @@ fn main() {
                            .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
                            .filter(|e: &walkdir::DirEntry| e.file_type().is_file()) {
 
-        let max_dependencies_amc: Arc<Mutex<Option<(String, Vec<String>)>>> = Arc::clone(&max_dependencies_am);
-        let dependants_map_amc: Arc<Mutex<HashMap<String, Vec::<String>>>> = Arc::clone(&dependants_map_am);
-        let max_dependants_amc: Arc<Mutex<Option<String>>> = Arc::clone(&max_dependants_am);
-        let max_features_amc: Arc<Mutex<Option<(String, Vec::<String>)>>> = Arc::clone(&max_features_am);
-        let max_versions_amc: Arc<Mutex<Option<(String, usize)>>> = Arc::clone(&max_versions_am);
+        let max_dependencies_amc: Amosvs = Arc::clone(&max_dependencies_am);
+        let dependants_map_amc: Amhsvs = Arc::clone(&dependants_map_am);
+        let max_dependants_amc: Amos = Arc::clone(&max_dependants_am);
+        let max_features_amc: Amosvs = Arc::clone(&max_features_am);
+        let max_versions_amc: Amosu = Arc::clone(&max_versions_am);
 
-        let handle = spawn(move || {
+        pool.execute(move || {
 
             let path: &str = {
                 let opt: Option<&str> = entry.path().to_str();
@@ -80,14 +81,13 @@ fn main() {
 
             let dependencies: Vec<&str> = last_line[dep_start..]
                 .match_indices(name_json_str)
-                .map(|(name_offset, _): (usize, _)| {
+                .filter_map(|(name_offset, _): (usize, _)| {
                     let name_start: usize = dep_start + name_offset + name_json_str.len();
                     let name_length_opt: Option<usize> = last_line[name_start..].find('\"');
                     if name_length_opt.is_none() { eprintln!("invalid .json file ({}) does not have a name quote closed:", path);
                                                    eprintln!("{}", &last_line[name_start..]); return None; }
-                    return Some(&last_line[name_start..name_start + name_length_opt.unwrap()]);
-              }).filter(|s: &Option<&str>| s.is_some() )
-                .map(|s: Option<&str>| s.unwrap() )
+                    Some(&last_line[name_start..name_start + name_length_opt.unwrap()])
+              })
                 .inspect(|&s| {
                     let mut dependants_map: MutexGuard<HashMap<String, Vec<String>>> = dependants_map_amc.lock().unwrap();
                     let dependants_count =  {
@@ -104,7 +104,8 @@ fn main() {
                     if max_dependants.is_none() || dependants_count > dependants_map.get(max_dependants.as_ref().unwrap()).unwrap().len() {
                         *max_dependants = Some(s.to_string());
                     }
-              }).collect();
+              })
+                .collect();
 
             let features: Vec<&str> = {
                 let features_start: usize = {
@@ -121,13 +122,12 @@ fn main() {
 
                 let mut split_rev = last_line[features_start..features_start + features_end].rsplit("\":[");
                 split_rev.next();
-                split_rev.map(|e: &str| {
-                            let feature_begin_opt: Option<usize> = e.rfind("\"");
+                split_rev.filter_map(|e: &str| {
+                            let feature_begin_opt: Option<usize> = e.rfind('\"');
                             if feature_begin_opt.is_none() { eprintln!("invalid .json file ({}) does not have closed quotes for a feature name", path);
                                                              eprintln!("{}", e); return None; }
                             Some(&e[feature_begin_opt.unwrap() + 1..])
-                       }).filter(|e| e.is_some())
-                         .map(|e| e.unwrap())
+                       })
                          .collect()
             };
 
@@ -154,31 +154,30 @@ fn main() {
                 }
             }
 
-            // println!("processed: {}", path);
+            // eprintln!("processed: {}", path);
 
         });
-        sx.send(Some(handle)).unwrap();
     }
 
-    sx.send(None).unwrap();
-
-    queue_handler.join().unwrap();
+    pool.join();
     
     {
         let max_dependencies: MutexGuard<Option<(String, Vec<String>)>> = max_dependencies_am.lock().unwrap();
-        eprintln!("max dependencies: {:?}", max_dependencies.as_ref().map(|(name, dependencies)| (name, dependencies.len())).unwrap());
+        println!("max dependencies: {:?}", max_dependencies.as_ref().map(|(name, dependencies)| (name, dependencies.len())).unwrap());
     }
     {
         let dependants_map: MutexGuard<HashMap<String, Vec<String>>> = dependants_map_am.lock().unwrap();
         let max_dependants: MutexGuard<Option<String>> = max_dependants_am.lock().unwrap();
-        eprintln!("max dependants: {:?}", dependants_map.get_key_value(max_dependants.as_ref().unwrap()).map(|(name, features)| (name, features.len())).unwrap());
+        println!("max dependants: {:?}", dependants_map.get_key_value(max_dependants.as_ref().unwrap()).map(|(name, features)| (name, features.len())).unwrap());
     }
     {
         let max_features: MutexGuard<Option<(String, Vec<String>)>> = max_features_am.lock().unwrap();
-        eprintln!("max features: {:?}", max_features.as_ref().map(|(name, features)| (name, features.len())).unwrap());
+        println!("max features: {:?}", max_features.as_ref().map(|(name, features)| (name, features.len())).unwrap());
     }
     {
         let max_versions: MutexGuard<Option<(String, usize)>> = max_versions_am.lock().unwrap();
-        eprintln!("max versions: {:?}", max_versions.as_ref().unwrap());
+        println!("max versions: {:?}", max_versions.as_ref().unwrap());
     }
+
+    println!("time elapsed: {:?}", start_time.elapsed())
 }

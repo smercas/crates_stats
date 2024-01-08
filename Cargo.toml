@@ -7,5 +7,5 @@ edition = "2021"
 
 [dependencies]
 git2 = "0.18.1"
-thiserror = "1.0.56"
 walkdir = "2.4.0"
+threadpool = "1.8.1"
