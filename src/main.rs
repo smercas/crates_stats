@@ -1,6 +1,8 @@
+use std::os::windows::fs::OpenOptionsExt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::collections::HashMap;
 use threadpool::ThreadPool;
+use std::io::Write;
 
 fn main() {
     let start_time = std::time::Instant::now();
@@ -14,7 +16,7 @@ fn main() {
         }},
     };
 
-    let pool: ThreadPool = ThreadPool::default();
+    let pool: ThreadPool = /*ThreadPool::default()*/ThreadPool::new(4);
     
     type Amosvs = Arc<Mutex<Option<(String, Vec<String>)>>>;
     type Amosu = Arc<Mutex<Option<(String, usize)>>>;
@@ -160,23 +162,37 @@ fn main() {
     }
 
     pool.join();
+
+    let mut output_file: std::fs::File = {
+        let res: Result<std::fs::File, std::io::Error> = std::fs::OpenOptions::new()
+                                                                              .create(true)
+                                                                              .access_mode(0o006)
+                                                                              .append(true)
+                                                                              .open("results.txt");
+        if res.is_err() { eprintln!("failed to open the output file, {}", res.unwrap_err()); return; }
+        res.unwrap()
+    };
     
     {
         let max_dependencies: MutexGuard<Option<(String, Vec<String>)>> = max_dependencies_am.lock().unwrap();
-        println!("max dependencies: {:?}", max_dependencies.as_ref().map(|(name, dependencies)| (name, dependencies.len())).unwrap());
+        let res: Result<(), std::io::Error> = writeln!(output_file, "max dependencies: {:?}", max_dependencies.as_ref().map(|(name, dependencies)| (name, dependencies.len())).unwrap());
+        if res.is_err() { eprintln!("failed to write part of the output to the file, {}", res.unwrap_err()); return; }
     }
     {
         let dependants_map: MutexGuard<HashMap<String, Vec<String>>> = dependants_map_am.lock().unwrap();
         let max_dependants: MutexGuard<Option<String>> = max_dependants_am.lock().unwrap();
-        println!("max dependants: {:?}", dependants_map.get_key_value(max_dependants.as_ref().unwrap()).map(|(name, features)| (name, features.len())).unwrap());
+        let res: Result<(), std::io::Error> = writeln!(output_file, "max dependants: {:?}", dependants_map.get_key_value(max_dependants.as_ref().unwrap()).map(|(name, features)| (name, features.len())).unwrap());
+        if res.is_err() { eprintln!("failed to write part of the output to the file, {}", res.unwrap_err()); return; }
     }
     {
         let max_features: MutexGuard<Option<(String, Vec<String>)>> = max_features_am.lock().unwrap();
-        println!("max features: {:?}", max_features.as_ref().map(|(name, features)| (name, features.len())).unwrap());
+        let res: Result<(), std::io::Error> = writeln!(output_file, "max features: {:?}", max_features.as_ref().map(|(name, features)| (name, features.len())).unwrap());
+        if res.is_err() { eprintln!("failed to write part of the output to the file, {}", res.unwrap_err()); return; }
     }
     {
         let max_versions: MutexGuard<Option<(String, usize)>> = max_versions_am.lock().unwrap();
-        println!("max versions: {:?}", max_versions.as_ref().unwrap());
+        let res: Result<(), std::io::Error> = writeln!(output_file, "max versions: {:?}", max_versions.as_ref().unwrap());
+        if res.is_err() { eprintln!("failed to write part of the output to the file, {}", res.unwrap_err()); return; }
     }
 
     println!("time elapsed: {:?}", start_time.elapsed())
